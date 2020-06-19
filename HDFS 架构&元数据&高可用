@@ -1,0 +1,196 @@
+
+[toc]
+[点击查看详细内容](https://44c15986.wiz03.com/wapp/pages/view/share/s/14MlC60YDkeR2tn1kR26ufym0zDTVm1p04Cd2AtGbP3LASag)
+
+# HDFS 架构
+
+
+
+## NameNode 角色
+
+**作用**  
+
+1)响应客户端读写请求
+
+2)管理HDFS元数据
+
+3)管理副本存放策略
+
+4)负责block负载均衡
+
+5)监控DataNode状态
+
+
+
+## DataNode 角色
+
+**作用**
+
+1)处理客户端读写请求
+
+2)存储并管理文件数据块
+
+3)定期向主备NN汇报心跳信息
+
+
+
+**掉线判断时限参数**  
+
+datanode 进程死亡或者网络故障造成 datanode 无法与 NN 通信，NN 不会立即把该节点判定为死亡，要经过一段时间，这段时间暂称作超时时长。HDFS 默认的超时时长为 2*5 分钟 + 10*3 秒。
+
+
+
+## JournalNode 角色
+
+**作用**  ：存储 NN 的 editlog
+
+
+
+
+每次 Active NN 写 EditLog时，会`并行`地向每个JN发送写请求，如果大多数的 JN节点返回成功，就认为向JN集群写入 EditLog 成功。否则认为这次提交 EditLog 失败， Active NN进程将退出，留待Standby NN 接管之后进行数据恢复；
+
+
+
+## ZKFC 角色
+
+**作用**  
+
+1.独立于 NN 进程的故障切换控制器，可实现`自动的主备选举、主备切换`。
+
+2.ZKFC 作为 NN 机器上一个`独立的进程`启动 ，启动时会创建 HealthMonitor 和 ActiveStandbyElector 组件
+
+- HealthMonitor：负责检测 NN 的健康状态，如果检测到 NN 的状态有变化，则回调 ZKFC 进行主备选举；
+
+- ActiveStandbyElector：负责NN主备选举，内部封装了 Zookeeper 的处理逻辑，完成主备选举后，则回调 ZKFC 进行 NN 主备切换。
+
+
+# HDFS元数据
+## 元数据是什么
+1.文件系统元数据
+
+文件目录树：有哪些目录、文件
+文件的owership、权限、大小等
+文件与block的映射：文件有哪些block
+
+2.block位置信息
+- DN主动上报，只存放NN的内存中；
+
+
+## 元数据存储
+
+1.内存：内存元数据 
+
+- 时刻保存最新状态
+
+- 存储所有的HDFS元数据
+
+- 用途：响应用户请求
+
+
+
+2.EditLog：操作日志 
+
+- NN对HDFS文件的每次修改操作先记入本地和JN的EditLog，操作成功后再更新到内存metadata；
+- EditLog 中的每个操作又称为一个事务，每个事务有一个整数形式的事务 id 作为编号；
+
+- 用途：仅用于数据恢复，但非常重要
+
+
+
+
+
+EditLog 会被切割为很多段，每一段称为一个 Segment。正在写入的 EditLog Segment 处于 in-progress 状态，其文件名形如 edits_inprogress_${start_txid}，其中${start_txid} 表示这个 segment 的起始事务 id，例如上图中的edits_inprogress_0000000000000000020。
+
+而已经写入完成的 EditLog Segment 处于 finalized 状态，其文件名形如 edits_${start_txid}-${end_txid}，其中${start_txid} 表示这个 segment 的起始事务 id，${end_txid} 表示这个 segment 的结束事务 id，例如上图中的 edits_0000000000000000001-0000000000000000019。
+
+
+
+3.fsimage：
+
+- 内存文件系统元数据的镜像，但不存储block的位置信息；
+
+- 用途：用于数据恢复，非常重要，建议存放到RAID1磁盘中；
+
+
+
+备NN 会定期对内存中的文件系统元数据进行 checkpoint ，在磁盘上生成新的 FSImage 文件。
+
+FSImage 文件的文件名形如 fsimage_${end_txid}，其中${end_txid} 表示这个fsimage 文件的结束事务 id，例如上图中的 fsimage_0000000000000000020。
+
+NN启动时会进行数据恢复，首先把 FSImage 文件加载到内存中，然后再把 EditLog 之中 FsImage 结束事务 id 之后的 EditLog 回放内存中。
+
+
+
+问：删除所有editlog后立即重启整个HDFS，是否会丢数据？
+
+会，因为重启NN后内存数据丢失，而fsimage不一定是最新的。如果最近1次checkpoint后上传了新文件，则DN上报新文件的block id时，NN不知道它属于哪个文件。
+
+
+
+## HA状态下的checkpoint 
+
+[checkpoint 详解](https://lihuimintu.github.io/2019/09/20/HDFS-HA-checkpoint/)
+
+
+
+
+
+1.SbNN查看是否满足checkpoint的条件(满足任意一个即可)
+- 距离上次checkpoint的时间间隔 >= ${dfs.namenode.checkpoint.period}，默认1小时
+
+- edits中的事务条数达到 ${dfs.namenode.checkpoint.txns} 限制，默认100W
+
+2.SbNN将内存中元数据序列化，然后保存成一个新的文件，命名为fsimage.ckpt_txid。其中txid是最后一个edit中的最后一条事务的ID（transaction ID）。然后为该fsimage文件创建一个MD5文件，并将fsimage文件重命名为fsimage_txid。
+
+3.SbNN向ANN发送一条HTTP GET请求。请求中包含了SbNN的域名，端口以及新fsimage的txid。
+
+4.ANN收到请求后，用获取到的信息反过来向SbNN再发送一条HTTP GET请求，获取新的fsimage文件。这个新的fsimage文件传输到ANN上后，也是先命名为fsimage.ckpt_txid，并为它创建一个MD5文件。然后再改名为fsimage_txid。
+
+
+
+**为什么是Standby NN进行checkpoint**   
+- 创建fsimage文件是IO密集型和CPU密集型操作
+- 为避免不一致，操作时需要进入安全模式，停止用户的并发访问
+- 基于上面2个原因，所以由Standby NN操作
+
+
+**Standby NN的内存与ANN是不是完全同步**    
+
+不是，ANN会实时同步操作记录到JN集群的EditLog，但SbNN只会`定期`从 JN集群上同步 `finalized 状态`的 EditLog，然后加载到内存中回放。如果JN机器的EditLog处于inprogess状态，里面的操作暂时不会传送给SbNN。
+
+
+
+
+
+# HDFS 高可用
+
+> 使用QJM（Quorum Journal Manager）方案
+
+
+
+
+
+## NN启动（HA模式）
+NN以 HA 模式启动的时候，NN 会认为自己处于 Standby 模式，先加载本地FSImage和JN集群上的EditLog到内存，再启动 EditLogTailer 线程和 StandbyCheckpointer 线程，正式进入 Standby 模式
+
+- EditLogTailer 线程：在 Standby NN 节点运行，`定期`从 JN集群上同步 `finalized 状态`的 EditLog，然后加载到内存中回放；
+
+- StandbyCheckpointer 线程：在 Standby NN 节点运行，定期进行 Checkpoint，然后将新的 FSImage 文件发送给 Active NN 节点。
+
+
+## NN主备选举
+由ZKFC进程的 ActiveStandbyElector 组件来完成的，主要是利用了 Zookeeper 的写一致性和临时节点机制，具体的主备选举实现如下：
+1. 两个NN 都会启动各自的 ZKFC 进程 ，ZKFC进程启动时会创建 HealthMonitor 和 ActiveStandbyElector 组件
+2. 如果 HealthMonitor 检测到本机的NN 的状态正常，而且目前还没有进行过主备选举。本机的ActiveStandbyElector 会发起主备选举：也就是在 Zookeeper 上创建一个路径为/hadoop-ha/${dfs.nameservices}/ActiveStandbyElectorLock 的临时节点，
+3. 创建成功的ActiveStandbyElector 会回调 ZKFC 将对应的 NN 切换为 Active 状态，而创建失败的 ActiveStandbyElector 将对应的 NN 切换为 Standby 状态。
+
+## NN主备切换
+
+1. 主备NN 选举完成后， zk 上会存在临时节点/hadoop-ha/${dfs.nameservices}/ActiveStandbyElectorLock ，而选举失败的备 NN 会监控该节点；
+
+2. 当主NN的 HealthMonitor 检测到 本机NN 状态异常，主NN的ZKFC 会删除ZK 上的临时节点，停止active状态对应的进程和服务，然后将状态标记为standby，同时产生NodeDeleted 事件 ；
+
+3. 备NN 的 ActiveStandbyElector 收到临时节点的 NodeDeleted 事件后，会马上在zk 上创建相同的临时节点。如果成功则将状态标记为 Active 状态，启动active状态对应的进程和服务，补齐所有EditLog后对外服务；
+
+4. 如果主 NN 服务器宕机，临时节点会被ZK主动删除，然后触发NN进行主备切换。
+
