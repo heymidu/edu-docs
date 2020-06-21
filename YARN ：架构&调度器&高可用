@@ -1,0 +1,89 @@
+[toc]
+[点击查看详情文档](https://44c15986.wiz03.com/wapp/pages/view/share/s/14MlC60YDkeR2tn1kR26ufym1HcxMD1i64x_2Sr2gw3YW3fa)
+# 架构
+MapReduce NextGen体系结构
+
+## ResourceManager（RM）角色
+> 主要由两个组件构成：调度器（Scheduler）和应用程序管理器（Applications Manager，ASM）
+
+1.处理客户端请求
+2.启动/监控AM
+3.监控NM
+4.资源的分配与调度
+
+**Scheduler**  
+- 调度器，只负责资源分配
+
+**ApplicationsManager**   
+- 接受job提交的请求，并为它分配1个Container运行AM
+- 监控AM，job失败时重启它的AM
+
+## NodeManager (NM) 角色
+>  集群的每个节点都运行自己的NM，管理本节点上的资源和任务。
+
+1.接收并处理来自RM/AM的Container启动/停止等各种请求；
+2.定时向Active RM发送心跳、资源使用情况、各Container的运行状态；
+
+## ApplicationMaster（AM）
+> 用户提交的每个作业均包含一个AM，N个任务
+
+1.向RM调度器申请资源(就是Container)，再分配给内部的任务;
+2.向NM请求启动/停止Container;
+3.监控任务运行状态，并在任务运行失败时重新为任务申请资源以重启任务。
+
+## Container
+> YARN中的资源抽象，它封装了某个节点上的多维度资源，如内存、CPU等。
+
+- 当AM向RM申请资源时，RM为AM返回的资源便是用Container表示
+- YARN会为每个`任务`分配一个Container，且该任务只能使用该Container中描述的资源
+
+
+# YARN Scheduler
+[YARN 调度器](https://blog.csdn.net/suifeng3051/article/details/49508261)
+## FIFO（先进先出）调度
+> 把作业按提交的顺序排成一个队列，先给队列中前面的作业分配资源，待前面的作业`需求满足后`再给下一个分配
+
+- 大的作业可能会占用所有集群资源，导致其它作业被阻塞；
+- 不适合用于共享集群
+
+
+
+
+## Capacity（容量）调度
+> 把集群资源分配给多个队列，保证每个队列都有一定资源
+
+- 用户只能使用绑定队列指定的资源
+- 队列内部可以再使用不同的调度方式，比如FIFO
+- **弹性队列**：为避免资源空闲，用户可使用其他队列的`空闲`资源，具体比例可设置
+ 
+
+
+
+## Fair（公平）调度
+> 为所有作业分配公平的资源，`公平的定义`可通过参数设置，比如1:1或1:2。
+
+这里写图片描述
+
+1.当A启动一个job而B没有任务时，A会获得全部集群资源；
+2.当B启动一个job后，A的job会继续运行，不过一会儿之后两个任务会各自获得一半的集群资源；
+3.如果此时B再启动第二个job并且其它job还在运行，则它将会和B的第一个job共享B这个队列的资源；
+4.也就是B的两个job会用于四分之一的集群资源，而A的job仍然用于集群一半的资源；
+5.结果就是资源在`用户之间公平调度`。
+
+
+# YARN 高可用
+ResourceManager高可用性概述
+
+- RM进程中的ActiveStandbyElector线程充当故障检测器和领导者选举者，而不是单独的ZKFC守护进程
+- NM只向Active RM汇报心跳
+
+## RM 主备选举
+1.所有的RM在启动时，都会去ZK上创建一个临时节点/yarn-leader-election/${dfs.nameservices}/ActiveStandbyElectorLock；
+2.创建成功的RM切换为Active状态，失败的RM保留Standby状态并监听该临时节点；
+3.Active RM接受NM的心跳，构建集群的资源信息，接受客户端的作业请求，并把所有job的信息存放在ZK的/rmstore目录下
+
+## RM 主备切换
+5.如果active RM挂了，其他的RM很快会知晓，然后通过步骤1的方式选举出Active RM；
+6.新的Active RM会从RMStateStore（也就是zk的/rmstore） 读取作业信息， 重新构建作业的内存信息
+7.然后接受NM的心跳，构建集群的资源信息，接受客户端的作业请求，同样把所有job的信息存放在RMStateStore中
+
